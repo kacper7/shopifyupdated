@@ -1,0 +1,227 @@
+require 'watir'
+require 'csv'
+require 'open-uri'
+require 'nokogiri'
+require 'retryable'
+require 'byebug'
+require 'net/ping'
+require 'headless'
+
+class Scraper
+  attr_accessor :browser
+
+  def initialize
+    Watir.default_timeout = 10
+    @browser = Watir::Browser.new :firefox, headless: true
+    #@browser = Watir::Browser.new(:chrome, options: {prefs: {'intl' => {'accept_languages' => 'en-GB'}}}, headless: true)
+    @iterations_limit = 500
+    @current_iteration = 0
+  end
+
+  def internet_connection
+    Net::Ping::External.new("8.8.8.8").ping?
+  end
+
+  def call
+    app_listing_details = []
+    File.open("sitemap_urls_1725419221.csv", "r") do |links|
+        links.each_with_index do |url, index|
+        @current_iteration += 1
+        create_new_session if @current_iteration % @iterations_limit == 0
+
+        begin
+            retries ||= 0
+            puts "Retry number #{retries}" if retries != 0
+            browser.goto(url)
+
+            # if cookie_bar.exists? # run this only if cookie bar is displayed
+            #   cookie_bar_button.click
+            # end
+
+            # Skip 404s and inactive apps
+            next if browser.div(class: "banner tw-bg-canvas-accent-blue tw-border-stroke-accent-blue tw-text-fg-accent-blue tw-p-4").exist? == true || browser.h1.exist? == false
+            
+            app_listing_details << listing_details
+            puts "Scraping app number #{index}: #{app_name}"
+            sleep(rand(2..3))
+            # sleep 60 if internet_connection == false
+        rescue => e
+            puts "ERROR: #{e.message} on #{url}, backtrace: #{e.backtrace}"
+            retry if (retries += 1) < 3
+        end
+        # Skip for inactive apps with no data
+        next if listing_details.nil?
+        save_to_csv(app_listing_details)
+        end
+    end
+  end
+
+  def create_new_session
+    @browser.close if @browser
+    @browser = Watir::Browser.new :chrome, headless: true
+  end
+
+  def save_to_csv(app_listing_details)
+    return if app_listing_details.nil? || app_listing_details.empty? || app_listing_details.all? { |row| row.nil? }
+
+    attributes = ['url',	'logo_url',	'app_name',	'tagline',	'developer_name',	'developer_shopify_url',	'categories',	'category_urls',	'launch_date',	'developer_app_count',	'developer_experience',	'developer_average_rating',	'developer_website',	'review_count',	'star_rating',	'pricing_model',	'price_range',	'pricing_plans_count']
+  
+    CSV.open("shopify_apps_092024.csv", "w", encoding: 'UTF-8') do |csv|
+      csv << attributes
+      app_listing_details.compact.each do |row|
+        csv << row.values
+      end
+    end
+  end
+
+  def cookie_bar
+    browser.div(class: 'cookies-notice js-is-active')
+  end
+
+  def cookie_bar_button
+    browser.buttons(class: 'marketing-button marketing-button--small marketing-button--skin-light js-dismiss-btn')[0]
+  end
+
+  def listing_details
+    if browser.div(class: "tw-col-span-full lg:tw-col-span-8 lg:tw-pl-gutter--desktop").text.include?("This app is not currently available on the Shopify App Store") == false && browser.h1.exist? == true
+      {
+        url: url,
+        logo_url: logo_url,
+        app_name: app_name,
+        tagline: tagline,
+        developer_name: developer_name,
+        developer_shopify_url: developer_shopify_url,
+        categories: categories,
+        category_urls: category_urls,
+        launch_date: launch_date,
+        developer_app_count: developer_app_count,
+        developer_experience: developer_experience,
+        developer_average_rating: developer_average_rating,
+        developer_website: developer_website,
+        review_count: review_count,
+        star_rating: star_rating,
+        pricing_model: pricing_model,
+        price_range: price_range,
+        pricing_plans_count: pricing_plans_count
+      }
+    end
+  end
+
+  def url
+    browser.url
+  end
+
+  def logo_url
+    browser.img(class: 'tw-rounded-sm tw-block tw-w-full').src
+  end
+
+  def app_name
+    browser.h1.text.encode('utf-8')
+  end
+
+  def tagline
+    browser.div(id: 'app-details').h2(class: 'tw-text-heading-lg tw-text-pretty').text.encode('utf-8')
+  end
+
+  def developer_name
+    browser.a(class: 'tw-group tw-text-link-sm tw-text-fg-primary hover:tw-text-fg-highlight-primary tw-no-underline tw-pb-2xs hover:tw-border-transparent tw-border-b tw-font-[450] !tw-border-b').text.encode('utf-8')
+  end
+
+  def developer_shopify_url
+    browser.a(class: 'tw-group tw-text-link-sm tw-text-fg-primary hover:tw-text-fg-highlight-primary tw-no-underline tw-pb-2xs hover:tw-border-transparent tw-border-b tw-font-[450] !tw-border-b').href
+  end
+
+  def categories
+    section = browser.spans(class: 'tw-text-fg-tertiary tw-text-body-sm')[0]
+    categories = section.as.map { |url| url.text }
+  end
+
+  def category_urls
+    section = browser.spans(class: 'tw-text-fg-tertiary tw-text-body-sm')[0]
+    categories = section.as.map { |url| url.href }
+  end
+
+  def review_count
+    return 0 if browser.div(class: 'tw-text-fg-secondary tw-flex tw-justify-center tw-items-center lg:tw-h-[250px]').exists? == true
+    browser.a(class: 'tw-group tw-text-link-sm tw-text-fg-primary hover:tw-text-fg-highlight-primary tw-no-underline tw-pb-2xs hover:tw-border-transparent tw-border-b tw-whitespace-nowrap tw-font-[450] !tw-border-b').text.gsub("(","").gsub(")","").to_i
+  end
+
+  def star_rating
+    browser.div(class: 'tw-flex tw-items-center tw-text-fg-primary tw-text-heading-2xl tw-pb-sm lg:tw-pb-0').text.to_f
+  end
+
+  def launch_date
+    browser.ps(class: 'tw-col-span-full sm:tw-col-span-3 tw-text-fg-secondary tw-text-body-md')[0].text.gsub(" · Changelog","")
+  end
+
+  def about_section
+    browser.divs(class: 'tw-flex tw-flex-col tw-gap-lg lg:tw-gap-2xl tw-mt-lg lg:tw-mt-2xl')
+  end
+
+  def developer_website
+    return nil if browser.div(class: 'tw-col-span-full sm:tw-col-span-3 tw-flex tw-flex-col tw-items-start tw-gap-xs').a(class: 'tw-group tw-text-link-md tw-text-fg-primary hover:tw-text-fg-highlight-primary tw-no-underline tw-pb-2xs hover:tw-border-transparent tw-border-b-2 tw-font-[450] !tw-border-b', text: 'Website').present? == false
+    browser.div(class: 'tw-col-span-full sm:tw-col-span-3 tw-flex tw-flex-col tw-items-start tw-gap-xs').a(class: 'tw-group tw-text-link-md tw-text-fg-primary hover:tw-text-fg-highlight-primary tw-no-underline tw-pb-2xs hover:tw-border-transparent tw-border-b-2 tw-font-[450] !tw-border-b', text: 'Website').href
+  end
+
+  def developer_app_count
+    return "-"
+    # Not displayed anymore
+    # about_section.text.match(".*\sapp.*")[0].split.first.to_i
+  end
+
+  def developer_average_rating
+    return "-"
+    # Not displayed anymore
+    # return "-" if about_section.text.match(".*average rating.*") == nil
+    # about_section.text.match(".*average rating.*")[0].split.first.to_f
+  end
+
+  def developer_experience
+    return "-"
+    # Not displayed anymore
+    # return 0 if about_section.text.match(".*years building apps.*") == nil
+    # about_section.text.match(".*years building apps.*")[0].split.first.to_i
+  end
+
+  def pricing_model
+    text = browser.div(class: 'tw-hidden sm:tw-block tw-text-pretty').text
+    if text == "Price: Free"
+      pricing_model = 'Free'
+    elsif text == "Free plan available. Free trial available."
+      pricing_model = 'Freemium + trial'
+    elsif text.include?('Free plan available') || text.include?('Free to install')
+      pricing_model = 'Freemium'
+    elsif text.include?('Free trial available')
+      pricing_model = 'Trial'
+    else
+      pricing_model = 'Paid'
+    end 
+  end
+
+  def price_range
+    pricing_plan_div = browser.div(class: 'tw-snap-center tw-flex tw-flex-col tw-justify-between tw-shadow-pricingCard tw-bg-canvas-primary tw-rounded-sm tw-overflow-hidden tw-mr-md last:tw-mr-0 lg:tw-mr-0 tw-mb-2xs lg:tw-mb-0 tw-w-full tw-min-w-[70%] xs:tw-min-w-[45%] sm:tw-min-w-[30%] md:tw-min-w-0')
+    return "-" if pricing_plan_div.present? == false
+
+    pricing_table = browser.div(class: 'tw-container tw-pt-sm tw-pb-md tw-flex tw-snap-x tw-overflow-x-auto tw-snap-mandatory lg:tw-grid lg:tw-gap-lg lg:tw-grid-flow-col xl:tw-gap-gutter--desktop lg:tw-auto-cols-fr')
+
+    prices = pricing_table.h3s.map { |h3| h3.text }
+
+    if prices.any? { |plan| plan.include?("month") }
+      cleaned_prices = prices.map { |price| price.gsub(/[^\d.]/, "") } # ["7.99", "15.99", "29.99"]
+      floating_prices = cleaned_prices.map { |n| n.to_f } # [7.99, 15.99, 29.99]
+      removed_zeroes =  floating_prices.reject { |element| element == 0.0 }
+      price_range = "$#{removed_zeroes.min}-$#{removed_zeroes.max}"
+    else
+      price_range = "-"
+    end
+    price_range
+  end 
+
+  def pricing_plans_count
+    pricing_plan_div = browser.divs(class: 'tw-snap-center tw-flex tw-flex-col tw-justify-between tw-shadow-pricingCard tw-bg-canvas-primary tw-rounded-sm tw-overflow-hidden tw-mr-md last:tw-mr-0 lg:tw-mr-0 tw-mb-2xs lg:tw-mb-0 tw-w-full tw-min-w-[70%] xs:tw-min-w-[45%] sm:tw-min-w-[30%] md:tw-min-w-0')
+    pricing_plans_count = pricing_plan_div.count
+  end
+end
+
+scraper = Scraper.new
+scraper.call
